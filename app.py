@@ -11,13 +11,13 @@ from pathlib import Path
 
 st.set_page_config(page_title="Automazione Notifiche e Atti", layout="wide")
 
-# Cartelle di lavoro sul Cloud
+# Directory di lavoro
 BASE_DIR = Path(__file__).resolve().parent
 MODELLI_DIR = BASE_DIR / "modelli_riferimento"
 MODELLI_DIR.mkdir(parents=True, exist_ok=True)
 RUBRICA_FILE = BASE_DIR / "enti_rubrica.json"
 
-# Gestione API Key (da Secrets o manuale)
+# Gestione API Key
 def get_api_key():
     if "GEMINI_API_KEY" in st.secrets:
         return st.secrets["GEMINI_API_KEY"]
@@ -35,7 +35,7 @@ if not api_key:
         api_key = api_key_input
         st.rerun()
 
-# Gestione Rubrica Enti salvata in sessione
+# Gestione Rubrica
 def carica_rubrica():
     if "rubrica" not in st.session_state:
         if RUBRICA_FILE.exists():
@@ -66,21 +66,21 @@ oggi = datetime.date.today()
 data_odierna_str = oggi.strftime("%d/%m/%Y")
 anno_corrente = oggi.year
 
-# Barra laterale per caricamento modelli Word
+# Barra laterale per i Modelli Word
 with st.sidebar:
     st.subheader("Modelli Word")
-    nuovo_modello = st.file_uploader("Carica modello base .docx", type=["docx"], key="upload_modello")
+    nuovo_modello = st.file_uploader("Carica modello base (.docx)", type=["docx"], key="upload_modello")
     if nuovo_modello:
         salva_path = MODELLI_DIR / nuovo_modello.name
         with open(salva_path, "wb") as f:
             f.write(nuovo_modello.getbuffer())
-        st.success(f"Modello {nuovo_modello.name} pronto!")
+        st.success(f"Modello {nuovo_modello.name} registrato!")
         st.rerun()
 
 modelli_disponibili = [f for f in os.listdir(MODELLI_DIR) if f.endswith(".docx") and not f.startswith("~$")]
 
 if not modelli_disponibili:
-    st.warning("Carica il tuo file modello Word (.docx) dal menu laterale a sinistra per cominciare.")
+    st.warning("Carica prima il tuo modello Word (.docx) dal menu laterale a sinistra.")
     modello_scelto = None
 else:
     modello_scelto = st.selectbox("Modello Word selezionato:", modelli_disponibili)
@@ -93,16 +93,17 @@ with col_prot:
 with col_data:
     st.info(f"📅 **Data documento (in alto a destra):** {data_odierna_str}")
 
-# Rubrica a tendina
+# Rubrica
 rubrica_enti = carica_rubrica()
 opzioni_enti = ["-- Rileva automaticamente dall'atto caricato --"] + list(rubrica_enti.keys())
 ente_selezionato = st.selectbox("Seleziona Ente Destinatario dalla Rubrica (o lascia automatico):", opzioni_enti)
 
-# Caricamento Atto
+# Caricamento Atto - ACCETTA QUALSIASI TIPO DI FILE SENZA FILTRI
 st.subheader("1. Atto/Richiesta di Notifica ricevuta")
 file_atto = st.file_uploader(
-    "Carica o scatta foto all'atto (PDF, Foto o Word):",
-    type=["pdf", "png", "jpg", "jpeg", "docx"]
+    "Carica o scatta foto all'atto (PDF, Foto/Immagini o Word - qualsiasi formato):",
+    type=None,
+    key="uploader_atto_universale"
 )
 
 # Note operative
@@ -190,13 +191,29 @@ Rispondi ESCLUSIVAMENTE in formato JSON:
 
     if file_caricato is not None:
         b = file_caricato.getvalue()
-        m = file_caricato.type
-        if m in ["application/pdf", "image/png", "image/jpeg", "image/jpg"]:
-            contenuti.append(types.Part.from_bytes(data=b, mime_type=m))
-        elif m == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
-            tdoc = Document(io.BytesIO(b))
-            txt = "\n".join([p.text for p in tdoc.paragraphs if p.text.strip()])
-            contenuti.append(f"\nTESTO DELL'ATTO CARICATO:\n{txt}")
+        nome_file = file_caricato.name.lower()
+        mime_rilevato = file_caricato.type or ""
+
+        # Rilevamento estensione e mime flessibile per accettare qualsiasi file
+        if nome_file.endswith(".pdf") or "pdf" in mime_rilevato:
+            contenuti.append(types.Part.from_bytes(data=b, mime_type="application/pdf"))
+        elif any(nome_file.endswith(ext) for ext in [".png", ".jpg", ".jpeg", ".webp"]) or "image" in mime_rilevato:
+            tipo_img = mime_rilevato if "image" in mime_rilevato else "image/jpeg"
+            contenuti.append(types.Part.from_bytes(data=b, mime_type=tipo_img))
+        elif nome_file.endswith(".docx"):
+            try:
+                tdoc = Document(io.BytesIO(b))
+                txt = "\n".join([p.text for p in tdoc.paragraphs if p.text.strip()])
+                contenuti.append(f"\nTESTO DELL'ATTO CARICATO:\n{txt}")
+            except Exception:
+                pass
+        else:
+            # Fallback generico: tenta come testo o PDF binario
+            try:
+                txt = b.decode("utf-8", errors="ignore")
+                contenuti.append(f"\nCONTENUTO DELL'ATTO:\n{txt}")
+            except Exception:
+                contenuti.append(types.Part.from_bytes(data=b, mime_type="application/pdf"))
 
     lista_modelli = trova_modelli_validi(client)
     ultimo_err = None
