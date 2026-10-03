@@ -17,6 +17,10 @@ MODELLI_DIR = BASE_DIR / "modelli_riferimento"
 MODELLI_DIR.mkdir(parents=True, exist_ok=True)
 RUBRICA_FILE = BASE_DIR / "enti_rubrica.json"
 
+# Inizializzazione sessione per reset
+if "uploader_key" not in st.session_state:
+    st.session_state["uploader_key"] = 0
+
 # Gestione API Key
 def get_api_key():
     if "GEMINI_API_KEY" in st.secrets:
@@ -98,13 +102,26 @@ rubrica_enti = carica_rubrica()
 opzioni_enti = ["-- Rileva automaticamente dall'atto caricato --"] + list(rubrica_enti.keys())
 ente_selezionato = st.selectbox("Seleziona Ente Destinatario dalla Rubrica (o lascia automatico):", opzioni_enti)
 
-# Caricamento Atto - ACCETTA QUALSIASI TIPO DI FILE SENZA FILTRI
+# Caricamento Atto con reset anti-blocco
 st.subheader("1. Atto/Richiesta di Notifica ricevuta")
+
+col_upload, col_reset = st.columns([4, 1])
+with col_reset:
+    if st.button("🔄 Sblocca/Reset Uploader"):
+        st.session_state["uploader_key"] += 1
+        st.rerun()
+
+# Metodo 1: Caricamento File (PDF, Foto, Screenshot, Word)
 file_atto = st.file_uploader(
-    "Carica o scatta foto all'atto (PDF, Foto/Immagini o Word - qualsiasi formato):",
-    type=None,
-    key="uploader_atto_universale"
+    "Trascina o scegli il file (PDF, Screenshot PNG/JPG, Word):",
+    key=f"uploader_{st.session_state['uploader_key']}"
 )
+
+# Metodo 2: Fotocamera diretta (ideale da smartphone)
+foto_camera = st.camera_input("Oppure scatta direttamente una foto all'atto con la fotocamera:")
+
+# Scelta del file effettivo
+documento_atto = file_atto or foto_camera
 
 # Note operative
 st.subheader("2. Note operative")
@@ -191,10 +208,9 @@ Rispondi ESCLUSIVAMENTE in formato JSON:
 
     if file_caricato is not None:
         b = file_caricato.getvalue()
-        nome_file = file_caricato.name.lower()
-        mime_rilevato = file_caricato.type or ""
+        nome_file = getattr(file_caricato, "name", "immagine.jpg").lower()
+        mime_rilevato = getattr(file_caricato, "type", "") or ""
 
-        # Rilevamento estensione e mime flessibile per accettare qualsiasi file
         if nome_file.endswith(".pdf") or "pdf" in mime_rilevato:
             contenuti.append(types.Part.from_bytes(data=b, mime_type="application/pdf"))
         elif any(nome_file.endswith(ext) for ext in [".png", ".jpg", ".jpeg", ".webp"]) or "image" in mime_rilevato:
@@ -208,12 +224,11 @@ Rispondi ESCLUSIVAMENTE in formato JSON:
             except Exception:
                 pass
         else:
-            # Fallback generico: tenta come testo o PDF binario
             try:
                 txt = b.decode("utf-8", errors="ignore")
                 contenuti.append(f"\nCONTENUTO DELL'ATTO:\n{txt}")
             except Exception:
-                contenuti.append(types.Part.from_bytes(data=b, mime_type="application/pdf"))
+                contenuti.append(types.Part.from_bytes(data=b, mime_type="image/jpeg"))
 
     lista_modelli = trova_modelli_validi(client)
     ultimo_err = None
@@ -269,15 +284,15 @@ if st.button("Elabora e Genera Lettera di Trasmissione"):
         st.error("Chiave Gemini API mancante.")
     elif not modello_scelto:
         st.error("Nessun modello Word disponibile. Caricalo dal menu laterale.")
-    elif not file_atto:
-        st.error("Carica o scatta una foto all'atto per procedere.")
+    elif not documento_atto:
+        st.error("Carica un file o scatta una foto all'atto per procedere.")
     else:
         with st.spinner("Elaborazione e compilazione in corso..."):
             try:
                 stile = raccogli_esempi_stile()
                 indirizzo_prefissato = rubrica_enti.get(ente_selezionato) if ente_selezionato in rubrica_enti else None
                 
-                risultato = elabora_con_gemini(api_key, file_atto, note_input, stile, indirizzo_prefissato)
+                risultato = elabora_con_gemini(api_key, documento_atto, note_input, stile, indirizzo_prefissato)
                 
                 prot_rif_estratto = risultato.get("protocollo_riferimento", "")
                 dest_estratto = risultato.get("destinatari", "")
