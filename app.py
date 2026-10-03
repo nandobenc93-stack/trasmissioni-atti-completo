@@ -1,5 +1,7 @@
 import streamlit as st
 from docx import Document
+from docx.shared import Pt, Inches
+from docx.enum.text import WD_ALIGN_PARAGRAPH
 from google import genai
 from google.genai import types
 import datetime
@@ -11,17 +13,17 @@ from pathlib import Path
 
 st.set_page_config(page_title="Automazione Notifiche e Atti", layout="wide")
 
-# Directory di lavoro
 BASE_DIR = Path(__file__).resolve().parent
 MODELLI_DIR = BASE_DIR / "modelli_riferimento"
 MODELLI_DIR.mkdir(parents=True, exist_ok=True)
 RUBRICA_FILE = BASE_DIR / "enti_rubrica.json"
 
-# Inizializzazione sessione per reset
-if "uploader_key" not in st.session_state:
-    st.session_state["uploader_key"] = 0
+# Inizializzazione session_state
+if "dati_elaborati" not in st.session_state:
+    st.session_state["dati_elaborati"] = None
+if "word_buffer" not in st.session_state:
+    st.session_state["word_buffer"] = None
 
-# Gestione API Key
 def get_api_key():
     if "GEMINI_API_KEY" in st.secrets:
         return st.secrets["GEMINI_API_KEY"]
@@ -31,33 +33,37 @@ def get_api_key():
 
 api_key = get_api_key()
 
-if not api_key:
-    st.sidebar.title("Configurazione")
-    api_key_input = st.sidebar.text_input("Inserisci Gemini API Key", type="password")
-    if api_key_input:
-        st.session_state["gemini_key"] = api_key_input
-        api_key = api_key_input
+with st.sidebar:
+    st.title("Impostazioni")
+    if not api_key:
+        api_input = st.text_input("Gemini API Key:", type="password")
+        if api_input:
+            st.session_state["gemini_key"] = api_input
+            api_key = api_input
+            st.rerun()
+    
+    st.subheader("Modelli Word")
+    nuovo_modello = st.file_uploader("Carica modello (.docx)", type=["docx"], key="side_modello")
+    if nuovo_modello:
+        with open(MODELLI_DIR / nuovo_modello.name, "wb") as f:
+            f.write(nuovo_modello.getbuffer())
+        st.success("Modello salvato!")
         st.rerun()
 
-# Gestione Rubrica
 def carica_rubrica():
-    if "rubrica" not in st.session_state:
-        if RUBRICA_FILE.exists():
-            try:
-                with open(RUBRICA_FILE, "r", encoding="utf-8") as f:
-                    st.session_state["rubrica"] = json.load(f)
-            except Exception:
-                st.session_state["rubrica"] = {}
-        else:
-            st.session_state["rubrica"] = {}
-    return st.session_state["rubrica"]
+    if RUBRICA_FILE.exists():
+        try:
+            with open(RUBRICA_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
 
 def aggiorna_rubrica(nome_ente, blocco_indirizzo):
     if not nome_ente or not blocco_indirizzo:
         return
     rubrica = carica_rubrica()
     rubrica[nome_ente.strip()] = blocco_indirizzo.strip()
-    st.session_state["rubrica"] = rubrica
     try:
         with open(RUBRICA_FILE, "w", encoding="utf-8") as f:
             json.dump(rubrica, f, ensure_ascii=False, indent=2)
@@ -70,26 +76,9 @@ oggi = datetime.date.today()
 data_odierna_str = oggi.strftime("%d/%m/%Y")
 anno_corrente = oggi.year
 
-# Barra laterale per i Modelli Word
-with st.sidebar:
-    st.subheader("Modelli Word")
-    nuovo_modello = st.file_uploader("Carica modello base (.docx)", type=["docx"], key="upload_modello")
-    if nuovo_modello:
-        salva_path = MODELLI_DIR / nuovo_modello.name
-        with open(salva_path, "wb") as f:
-            f.write(nuovo_modello.getbuffer())
-        st.success(f"Modello {nuovo_modello.name} registrato!")
-        st.rerun()
-
-modelli_disponibili = [f for f in os.listdir(MODELLI_DIR) if f.endswith(".docx") and not f.startswith("~$")]
-
-if not modelli_disponibili:
-    st.warning("Carica prima il tuo modello Word (.docx) dal menu laterale a sinistra.")
-    modello_scelto = None
-else:
-    modello_scelto = st.selectbox("Modello Word selezionato:", modelli_disponibili)
-
-st.divider()
+modelli_docx = [f for f in os.listdir(MODELLI_DIR) if f.endswith(".docx") and not f.startswith("~$")]
+opzioni_modello = ["-- Modello Istituzionale Standard (Generato al volo) --"] + modelli_docx
+modello_scelto = st.selectbox("Formato / Modello Word di base:", opzioni_modello)
 
 col_prot, col_data = st.columns(2)
 with col_prot:
@@ -97,254 +86,233 @@ with col_prot:
 with col_data:
     st.info(f"📅 **Data documento (in alto a destra):** {data_odierna_str}")
 
-# Rubrica
 rubrica_enti = carica_rubrica()
 opzioni_enti = ["-- Rileva automaticamente dall'atto caricato --"] + list(rubrica_enti.keys())
-ente_selezionato = st.selectbox("Seleziona Ente Destinatario dalla Rubrica (o lascia automatico):", opzioni_enti)
+ente_selezionato = st.selectbox("Destinatario da Rubrica:", opzioni_enti)
 
-# Caricamento Atto con reset anti-blocco
 st.subheader("1. Atto/Richiesta di Notifica ricevuta")
-
-col_upload, col_reset = st.columns([4, 1])
-with col_reset:
-    if st.button("🔄 Sblocca/Reset Uploader"):
-        st.session_state["uploader_key"] += 1
-        st.rerun()
-
-# Metodo 1: Caricamento File (PDF, Foto, Screenshot, Word)
 file_atto = st.file_uploader(
-    "Trascina o scegli il file (PDF, Screenshot PNG/JPG, Word):",
-    key=f"uploader_{st.session_state['uploader_key']}"
+    "Carica o scatta foto all'atto (PDF, Foto JPG/PNG o Word):",
+    key="file_atto_main"
 )
 
-# Metodo 2: Fotocamera diretta (ideale da smartphone)
-foto_camera = st.camera_input("Oppure scatta direttamente una foto all'atto con la fotocamera:")
-
-# Scelta del file effettivo
-documento_atto = file_atto or foto_camera
-
-# Note operative
 st.subheader("2. Note operative")
 note_input = st.text_input(
     "Dettagli operativi (opzionale):",
     placeholder="Es. Notificato a mani proprie / irreperibile..."
 )
 
-def estrai_testo_docx(file_path):
-    try:
-        doc = Document(file_path)
-        return "\n".join([p.text for p in doc.paragraphs if p.text.strip()])
-    except Exception:
-        return ""
+def genera_docx_standard(data_str, prot_uscita, prot_rif, destinatari, oggetto, corpo):
+    doc = Document()
+    sections = doc.sections
+    for section in sections:
+        section.top_margin = Inches(0.8)
+        section.bottom_margin = Inches(0.8)
+        section.left_margin = Inches(1.0)
+        section.right_margin = Inches(1.0)
 
-def raccogli_esempi_stile():
-    esempi = []
-    for f in os.listdir(MODELLI_DIR):
-        if f.endswith(".docx") and not f.startswith("~$"):
-            percorso = MODELLI_DIR / f
-            testo = estrai_testo_docx(percorso)
-            if testo:
-                esempi.append(f"--- ESEMPIO DA '{f}' ---\n{testo[:1500]}\n")
-    return "\n".join(esempi)
+    # Riga in alto: Protocollo a sinistra, Data a destra
+    p_top = doc.add_paragraph()
+    r_prot = p_top.add_run(f"Prot. {prot_uscita}")
+    r_prot.bold = True
+    r_prot.font.size = Pt(10)
+    p_top.add_run("\t\t\t\t\t\t")
+    r_data = p_top.add_run(f"Data: {data_str}")
+    r_data.font.size = Pt(10)
 
-def trova_modelli_validi(client):
-    candidati = []
-    try:
-        for m in client.models.list():
-            nome = getattr(m, "name", "").split("/")[-1]
-            metodi = getattr(m, "supported_generation_methods", []) or getattr(m, "supported_actions", [])
-            if not metodi or "generateContent" in str(metodi):
-                candidati.append(nome)
-    except Exception:
-        pass
-    priorita = ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash", "gemini-flash"]
-    ordinati = [p for p in priorita if any(p in c for c in candidati)]
-    return ordinati if ordinati else ["gemini-2.5-flash", "gemini-2.0-flash"]
+    p_space = doc.add_paragraph()
+    p_space.paragraph_format.space_before = Pt(18)
 
-def elabora_con_gemini(chiave, file_caricato, note_op, esempi_stile, indirizzo_fisso=None):
+    # Destinatari a destra
+    p_dest = doc.add_paragraph()
+    p_dest.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    for riga in destinatari.split("\n"):
+        if riga.strip():
+            r = p_dest.add_run(riga.strip() + "\n")
+            r.bold = True
+            r.font.size = Pt(11)
+
+    doc.add_paragraph().paragraph_format.space_before = Pt(14)
+
+    # Oggetto
+    p_ogg = doc.add_paragraph()
+    r_ogg_label = p_ogg.add_run("OGGETTO: ")
+    r_ogg_label.bold = True
+    r_ogg_label.font.size = Pt(11)
+    r_ogg = p_ogg.add_run(oggetto)
+    r_ogg.bold = True
+    r_ogg.font.size = Pt(11)
+
+    doc.add_paragraph().paragraph_format.space_before = Pt(14)
+
+    # Corpo lettera
+    p_corpo = doc.add_paragraph()
+    p_corpo.paragraph_format.line_spacing = 1.15
+    p_corpo.paragraph_format.space_after = Pt(12)
+    r_corpo = p_corpo.add_run(corpo)
+    r_corpo.font.size = Pt(11)
+
+    doc.add_paragraph().paragraph_format.space_before = Pt(36)
+
+    # Firma a destra
+    p_firma = doc.add_paragraph()
+    p_firma.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    p_firma.add_run("IL COMANDANTE\n(firma e timbro)")
+
+    # Protocollo Riferimento in basso a sinistra
+    if prot_rif:
+        doc.add_paragraph().paragraph_format.space_before = Pt(30)
+        p_rif = doc.add_paragraph()
+        r_rif = p_rif.add_run(prot_rif)
+        r_rif.font.size = Pt(9)
+        r_rif.italic = True
+
+    buf = io.BytesIO()
+    doc.save(buf)
+    buf.seek(0)
+    return buf
+
+def elabora_con_gemini(chiave, file_caricato, note_op, indirizzo_fisso=None):
     client = genai.Client(api_key=chiave)
     contenuti = []
 
     prompt = f"""
 Sei un addetto esperto delle Forze dell'Ordine / Pubblica Amministrazione italiana incaricato di redigere la lettera di trasmissione per la restituzione di un atto notificato.
 
-ISTRUZIONI DI ESTRAZIONE E FORMULAZIONE:
+REGOLE TASSATIVE:
+1. PROTOCOLLO IN BASSO A SINISTRA:
+   - Estrai protocollo, R.G.N.R., R.G. DIB o estremi dell'atto arrivato (es. "Rif. nota prot. n. 1234 del 12/03/2026").
 
-1. PROTOCOLLO / RIFERIMENTO ATTO IN ENTRATA (PER LA POSIZIONE IN BASSO A SINISTRA):
-   - Estrai il numero di protocollo, numero di registro/procedimento o identificativo dell'atto delegato dall'ente mittente (es. "Rif. nota prot. n. 1234/2026 del 12/03/2026" oppure "Proc. Pen. n. 567/2026 R.G.N.R.").
+2. DESTINATARI:
+   - Individua l'autorità o ufficio mittente (Tribunale, Procura, Questura, Prefettura, ecc.) con cancelleria e indirizzo/PEC.
+   - Fornisci un "nome_breve_ente" sintetico per la rubrica.
 
-2. ENTE RICHIEDENTE / DESTINATARI (INDIRIZZI):
-   - Se l'ente non è già preselezionato, individua con esattezza l'autorità o ufficio mittente (es. Tribunale, Procura, Questura, Prefettura, Ufficio NEP, ecc.), con cancelleria/sezione di competenza e indirizzo o PEC.
-   - Fornisci un "nome_breve_ente" sintetico per la rubrica (es. "Tribunale di Reggio Calabria - Cancelleria Penale") e il blocco completo degli indirizzi.
-
-3. DATI ANAGRAFICI:
-   - Estrai: Cognome e Nome, data di nascita, luogo di nascita (con provincia), residenza (comune, prov, via) e domicilio (se indicato). Se residenza o domicilio non sono presenti, ometti solo la voce assente.
-
-4. OGGETTO DELLA LETTERA:
-   - Deve essere redatto TASSATIVAMENTE nel seguente formato:
+3. OGGETTO DELLA LETTERA:
+   - Deve iniziare tassativamente con:
      "Trasmissione atti notificati a carico di [COGNOME Nome, nato a LUOGO (PROV) il GG/MM/AAAA, residente a COMUNE (PROV) in VIA/PIAZZA, domiciliato a COMUNE (PROV) in VIA/PIAZZA]"
 
-5. CORPO DELLA LETTERA:
-   - Deve iniziare TASSATIVAMENTE con la formula:
+4. CORPO DELLA LETTERA:
+   - Deve iniziare tassativamente con:
      "Allegato alla presente si restituisce debitamente notificato al soggetto sopra meglio indicato "
-   - Prosegui specificando l'atto notificato e i relativi estremi legali/giudiziari dedotti dai file (es. "l'atto di citazione a giudizio relativo al procedimento penale n. ... R.G.N.R. e n. ... R.G. DIB.").
-   - Concludi con la formula: "per il prosieguo di competenza.".
-   - Ricalca fedelmente lo stile formale presente in questi atti d'esempio:
-{esempi_stile}
+   - Prosegui con il tipo di atto e i riferimenti precisi, terminando con "per il prosieguo di competenza.".
 
-NOTE AGGIUNTIVE OPERATORE:
-{note_op if note_op else "Notifica eseguita regolarmente."}
+NOTE AGGIUNTIVE: {note_op if note_op else "Notifica eseguita."}
 
 Rispondi ESCLUSIVAMENTE in formato JSON:
 {{
-  "protocollo_riferimento": "Rif. prot. n. ... del ... (o estremi atto)",
-  "nome_breve_ente": "Nome sintetico per rubrica",
-  "destinatari": "Riga 1 Ente e Ufficio\\nRiga 2 Indirizzo o PEC",
-  "oggetto": "Oggetto completo conforme alle istruzioni",
-  "corpo_lettera": "Testo completo che inizia con 'Allegato alla presente si restituisce debitamente notificato al soggetto sopra meglio indicato...'"
+  "protocollo_riferimento": "Rif. prot. ...",
+  "nome_breve_ente": "Nome per rubrica",
+  "destinatari": "Ente e Ufficio\\nIndirizzo/PEC",
+  "oggetto": "Oggetto completo",
+  "corpo_lettera": "Allegato alla presente si restituisce debitamente notificato..."
 }}
 """
     contenuti.append(prompt)
 
-    if file_caricato is not None:
-        b = file_caricato.getvalue()
-        nome_file = getattr(file_caricato, "name", "immagine.jpg").lower()
-        mime_rilevato = getattr(file_caricato, "type", "") or ""
+    b = file_caricato.getvalue()
+    nome = getattr(file_caricato, "name", "").lower()
+    mime = getattr(file_caricato, "type", "") or ""
 
-        if nome_file.endswith(".pdf") or "pdf" in mime_rilevato:
-            contenuti.append(types.Part.from_bytes(data=b, mime_type="application/pdf"))
-        elif any(nome_file.endswith(ext) for ext in [".png", ".jpg", ".jpeg", ".webp"]) or "image" in mime_rilevato:
-            tipo_img = mime_rilevato if "image" in mime_rilevato else "image/jpeg"
-            contenuti.append(types.Part.from_bytes(data=b, mime_type=tipo_img))
-        elif nome_file.endswith(".docx"):
-            try:
-                tdoc = Document(io.BytesIO(b))
-                txt = "\n".join([p.text for p in tdoc.paragraphs if p.text.strip()])
-                contenuti.append(f"\nTESTO DELL'ATTO CARICATO:\n{txt}")
-            except Exception:
-                pass
-        else:
-            try:
-                txt = b.decode("utf-8", errors="ignore")
-                contenuti.append(f"\nCONTENUTO DELL'ATTO:\n{txt}")
-            except Exception:
-                contenuti.append(types.Part.from_bytes(data=b, mime_type="image/jpeg"))
+    if nome.endswith(".pdf") or "pdf" in mime:
+        contenuti.append(types.Part.from_bytes(data=b, mime_type="application/pdf"))
+    elif any(nome.endswith(ext) for ext in [".png", ".jpg", ".jpeg", ".webp"]) or "image" in mime:
+        contenuti.append(types.Part.from_bytes(data=b, mime_type="image/jpeg"))
+    elif nome.endswith(".docx"):
+        tdoc = Document(io.BytesIO(b))
+        txt = "\n".join([p.text for p in tdoc.paragraphs if p.text.strip()])
+        contenuti.append(f"\nTESTO ATTO:\n{txt}")
+    else:
+        contenuti.append(types.Part.from_bytes(data=b, mime_type="application/pdf"))
 
-    lista_modelli = trova_modelli_validi(client)
-    ultimo_err = None
-    for mod in lista_modelli:
-        for _ in range(2):
-            try:
-                res = client.models.generate_content(
-                    model=mod,
-                    contents=contenuti,
-                    config={"response_mime_type": "application/json"}
-                )
-                t = res.text.strip()
-                if t.startswith("```json"):
-                    t = t[7:]
-                if t.startswith("```"):
-                    t = t[3:]
-                if t.endswith("```"):
-                    t = t[:-3]
-                dati = json.loads(t.strip())
-                if indirizzo_fisso:
-                    dati["destinatari"] = indirizzo_fisso
-                return dati
-            except Exception as e:
-                ultimo_err = e
-                if "404" in str(e) or "NOT_FOUND" in str(e):
-                    break
-                time.sleep(2)
-                continue
-    raise ultimo_err
-
-def sostituisci_placeholder_docx(doc, sostituzioni):
-    for p in doc.paragraphs:
-        for k, v in sostituzioni.items():
-            if k in p.text:
-                for r in p.runs:
-                    if k in r.text:
-                        r.text = r.text.replace(k, v)
-
-    for tbl in doc.tables:
-        for row in tbl.rows:
-            for cell in row.cells:
-                for p in cell.paragraphs:
-                    for k, v in sostituzioni.items():
-                        if k in p.text:
-                            for r in p.runs:
-                                if k in r.text:
-                                    r.text = r.text.replace(k, v)
+    # Modello solido e veloce
+    res = client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=contenuti,
+        config={"response_mime_type": "application/json"}
+    )
+    t = res.text.strip()
+    if t.startswith("```json"):
+        t = t[7:]
+    if t.startswith("```"):
+        t = t[3:]
+    if t.endswith("```"):
+        t = t[:-3]
+    dati = json.loads(t.strip())
+    if indirizzo_fisso:
+        dati["destinatari"] = indirizzo_fisso
+    return dati
 
 st.divider()
 
-if st.button("Elabora e Genera Lettera di Trasmissione"):
+# PULSANTE DI AZIONE PRINCIPALE
+if st.button("🚀 Elabora e Genera Lettera di Trasmissione", type="primary", use_container_width=True):
     if not api_key:
-        st.error("Chiave Gemini API mancante.")
-    elif not modello_scelto:
-        st.error("Nessun modello Word disponibile. Caricalo dal menu laterale.")
-    elif not documento_atto:
-        st.error("Carica un file o scatta una foto all'atto per procedere.")
+        st.error("❌ Manca la Gemini API Key. Inseriscila nella barra laterale a sinistra.")
+    elif not file_atto:
+        st.error("❌ Nessun file caricato! Carica prima il PDF o la foto dell'atto al punto 1.")
     else:
-        with st.spinner("Elaborazione e compilazione in corso..."):
+        with st.spinner("⏳ Analisi dell'atto ed estrazione dati con Gemini in corso..."):
             try:
-                stile = raccogli_esempi_stile()
-                indirizzo_prefissato = rubrica_enti.get(ente_selezionato) if ente_selezionato in rubrica_enti else None
-                
-                risultato = elabora_con_gemini(api_key, documento_atto, note_input, stile, indirizzo_prefissato)
-                
-                prot_rif_estratto = risultato.get("protocollo_riferimento", "")
-                dest_estratto = risultato.get("destinatari", "")
-                ente_breve = risultato.get("nome_breve_ente", "")
-                oggetto_estratto = risultato.get("oggetto", "")
-                corpo_estratto = risultato.get("corpo_lettera", "")
+                ind_fisso = rubrica_enti.get(ente_selezionato) if not ente_selezionato.startswith("--") else None
+                risultato = elabora_con_gemini(api_key, file_atto, note_input, ind_fisso)
+                st.session_state["dati_elaborati"] = risultato
 
-                if ente_selezionato.startswith("--") and ente_breve and dest_estratto:
-                    aggiorna_rubrica(ente_breve, dest_estratto)
+                if ente_selezionato.startswith("--") and risultato.get("nome_breve_ente") and risultato.get("destinatari"):
+                    aggiorna_rubrica(risultato["nome_breve_ente"], risultato["destinatari"])
 
-                st.success("Dati estratti con successo!")
-
-                c_p1, c_p2 = st.columns(2)
-                with c_p1:
-                    prot_uscita_val = st.text_input("Protocollo Uscita (in alto a sinistra):", value=protocollo_input)
-                with c_p2:
-                    prot_rif_val = st.text_input("Protocollo/Riferimento Atto (in basso a sinistra):", value=prot_rif_estratto)
-
-                c1, c2 = st.columns(2)
-                with c1:
-                    dest_finale = st.text_area("Destinatari / Ente:", value=dest_estratto, height=130)
-                with c2:
-                    ogg_finale = st.text_area("Oggetto generato:", value=oggetto_estratto, height=130)
-
-                corpo_finale = st.text_area("Testo trasmissione:", value=corpo_estratto, height=180)
-
-                percorso_docx = MODELLI_DIR / modello_scelto
-                doc = Document(percorso_docx)
-
-                mappa = {
-                    "{{DATA}}": data_odierna_str,
-                    "{{PROTOCOLLO}}": prot_uscita_val,
-                    "{{PROTOCOLLO_USCITA}}": prot_uscita_val,
-                    "{{PROTOCOLLO_RIFERIMENTO}}": prot_rif_val,
-                    "{{RIFERIMENTO}}": prot_rif_val,
-                    "{{DESTINATARI}}": dest_finale,
-                    "{{OGGETTO}}": ogg_finale,
-                    "{{CORPO_LETTERA}}": corpo_finale
-                }
-
-                sostituisci_placeholder_docx(doc, mappa)
-
-                doc_buffer = io.BytesIO()
-                doc.save(doc_buffer)
-                doc_buffer.seek(0)
-
-                st.download_button(
-                    label="📥 Scarica Lettera di Trasmissione Compilata (.docx)",
-                    data=doc_buffer,
-                    file_name=f"trasmissione_{datetime.date.today().strftime('%Y%m%d')}.docx",
-                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-                )
-
+                st.success("✅ Atto analizzato con successo!")
             except Exception as e:
-                st.error(f"Si è verificato un errore: {e}")
+                st.error(f"Errore durante l'elaborazione: {e}")
+
+# MOSTRA RISULTATI E DOWNLOAD SE PRESENTI IN MEMORIA
+if st.session_state.get("dati_elaborati"):
+    dati = st.session_state["dati_elaborati"]
+    
+    st.subheader("📋 Anteprima e Modifica Dati")
+    cp1, cp2 = st.columns(2)
+    with cp1:
+        prot_u = st.text_input("Protocollo Uscita:", value=protocollo_input)
+    with cp2:
+        prot_r = st.text_input("Protocollo/Rif. Atto estratto:", value=dati.get("protocollo_riferimento", ""))
+
+    c1, c2 = st.columns(2)
+    with c1:
+        dest_f = st.text_area("Destinatari / Ente:", value=dati.get("destinatari", ""), height=130)
+    with c2:
+        ogg_f = st.text_area("Oggetto Generato:", value=dati.get("oggetto", ""), height=130)
+
+    corpo_f = st.text_area("Testo Trasmissione:", value=dati.get("corpo_lettera", ""), height=180)
+
+    # Creazione file Word pronto
+    if modello_scelto.startswith("--"):
+        word_buf = genera_docx_standard(data_odierna_str, prot_u, prot_r, dest_f, ogg_f, corpo_f)
+    else:
+        doc = Document(MODELLI_DIR / modello_scelto)
+        mappa = {
+            "{{DATA}}": data_odierna_str,
+            "{{PROTOCOLLO}}": prot_u,
+            "{{PROTOCOLLO_USCITA}}": prot_u,
+            "{{PROTOCOLLO_RIFERIMENTO}}": prot_r,
+            "{{RIFERIMENTO}}": prot_r,
+            "{{DESTINATARI}}": dest_f,
+            "{{OGGETTO}}": ogg_f,
+            "{{CORPO_LETTERA}}": corpo_f
+        }
+        for p in doc.paragraphs:
+            for k, v in mappa.items():
+                if k in p.text:
+                    for r in p.runs:
+                        if k in r.text:
+                            r.text = r.text.replace(k, v)
+        word_buf = io.BytesIO()
+        doc.save(word_buf)
+        word_buf.seek(0)
+
+    st.download_button(
+        label="📥 SCARICA LETTERA DI TRASMISSIONE (.DOCX)",
+        data=word_buf,
+        file_name=f"trasmissione_{oggi.strftime('%Y%m%d')}.docx",
+        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        type="primary",
+        use_container_width=True
+    )
