@@ -8,7 +8,6 @@ import datetime
 import io
 import json
 import os
-import time
 from pathlib import Path
 
 st.set_page_config(page_title="Automazione Notifiche e Atti", layout="wide")
@@ -18,11 +17,10 @@ MODELLI_DIR = BASE_DIR / "modelli_riferimento"
 MODELLI_DIR.mkdir(parents=True, exist_ok=True)
 RUBRICA_FILE = BASE_DIR / "enti_rubrica.json"
 
-# Inizializzazione session_state
+if "reset_count" not in st.session_state:
+    st.session_state["reset_count"] = 0
 if "dati_elaborati" not in st.session_state:
     st.session_state["dati_elaborati"] = None
-if "word_buffer" not in st.session_state:
-    st.session_state["word_buffer"] = None
 
 def get_api_key():
     if "GEMINI_API_KEY" in st.secrets:
@@ -91,10 +89,33 @@ opzioni_enti = ["-- Rileva automaticamente dall'atto caricato --"] + list(rubric
 ente_selezionato = st.selectbox("Destinatario da Rubrica:", opzioni_enti)
 
 st.subheader("1. Atto/Richiesta di Notifica ricevuta")
-file_atto = st.file_uploader(
-    "Carica o scatta foto all'atto (PDF, Foto JPG/PNG o Word):",
-    key="file_atto_main"
+
+col_btn_reset, _ = st.columns([1, 4])
+with col_btn_reset:
+    if st.button("🔄 Pulisci/Sblocca Uploader"):
+        st.session_state["reset_count"] += 1
+        st.session_state["dati_elaborati"] = None
+        st.rerun()
+
+modalita_caricamento = st.radio(
+    "Scegli come inserire l'atto:",
+    ["Carica File (PDF, Foto, Word)", "Scatta Foto con Fotocamera (da cellulare/webcam)"],
+    horizontal=True
 )
+
+file_atto = None
+if modalita_caricamento == "Carica File (PDF, Foto, Word)":
+    file_atto = st.file_uploader(
+        "Seleziona o trascina il file dell'atto:",
+        key=f"file_uploader_{st.session_state['reset_count']}"
+    )
+else:
+    file_atto = st.camera_input("Inquadra e scatta la foto all'atto:")
+
+if file_atto:
+    st.success(f"📎 Documento agganciato: **{getattr(file_atto, 'name', 'Foto scattata')}** ({round(len(file_atto.getvalue())/1024, 1)} KB)")
+else:
+    st.info("ℹ️ Nessun documento agganciato. Carica un file o scatta una foto prima di procedere.")
 
 st.subheader("2. Note operative")
 note_input = st.text_input(
@@ -104,14 +125,12 @@ note_input = st.text_input(
 
 def genera_docx_standard(data_str, prot_uscita, prot_rif, destinatari, oggetto, corpo):
     doc = Document()
-    sections = doc.sections
-    for section in sections:
+    for section in doc.sections:
         section.top_margin = Inches(0.8)
         section.bottom_margin = Inches(0.8)
         section.left_margin = Inches(1.0)
         section.right_margin = Inches(1.0)
 
-    # Riga in alto: Protocollo a sinistra, Data a destra
     p_top = doc.add_paragraph()
     r_prot = p_top.add_run(f"Prot. {prot_uscita}")
     r_prot.bold = True
@@ -120,10 +139,8 @@ def genera_docx_standard(data_str, prot_uscita, prot_rif, destinatari, oggetto, 
     r_data = p_top.add_run(f"Data: {data_str}")
     r_data.font.size = Pt(10)
 
-    p_space = doc.add_paragraph()
-    p_space.paragraph_format.space_before = Pt(18)
+    doc.add_paragraph().paragraph_format.space_before = Pt(18)
 
-    # Destinatari a destra
     p_dest = doc.add_paragraph()
     p_dest.alignment = WD_ALIGN_PARAGRAPH.RIGHT
     for riga in destinatari.split("\n"):
@@ -134,32 +151,25 @@ def genera_docx_standard(data_str, prot_uscita, prot_rif, destinatari, oggetto, 
 
     doc.add_paragraph().paragraph_format.space_before = Pt(14)
 
-    # Oggetto
     p_ogg = doc.add_paragraph()
-    r_ogg_label = p_ogg.add_run("OGGETTO: ")
-    r_ogg_label.bold = True
-    r_ogg_label.font.size = Pt(11)
+    r_ogg_l = p_ogg.add_run("OGGETTO: ")
+    r_ogg_l.bold = True
     r_ogg = p_ogg.add_run(oggetto)
     r_ogg.bold = True
-    r_ogg.font.size = Pt(11)
 
     doc.add_paragraph().paragraph_format.space_before = Pt(14)
 
-    # Corpo lettera
     p_corpo = doc.add_paragraph()
     p_corpo.paragraph_format.line_spacing = 1.15
     p_corpo.paragraph_format.space_after = Pt(12)
-    r_corpo = p_corpo.add_run(corpo)
-    r_corpo.font.size = Pt(11)
+    p_corpo.add_run(corpo)
 
     doc.add_paragraph().paragraph_format.space_before = Pt(36)
 
-    # Firma a destra
     p_firma = doc.add_paragraph()
     p_firma.alignment = WD_ALIGN_PARAGRAPH.RIGHT
     p_firma.add_run("IL COMANDANTE\n(firma e timbro)")
 
-    # Protocollo Riferimento in basso a sinistra
     if prot_rif:
         doc.add_paragraph().paragraph_format.space_before = Pt(30)
         p_rif = doc.add_paragraph()
@@ -187,12 +197,13 @@ REGOLE TASSATIVE:
    - Individua l'autorità o ufficio mittente (Tribunale, Procura, Questura, Prefettura, ecc.) con cancelleria e indirizzo/PEC.
    - Fornisci un "nome_breve_ente" sintetico per la rubrica.
 
-3. OGGETTO DELLA LETTERA:
-   - Deve iniziare tassativamente con:
+3. DATI ANAGRAFICI ED OGGETTO:
+   - Estrai: cognome, nome, data e luogo di nascita, residenza e domicilio (se presenti).
+   - L'oggetto DEVE essere formulato nel seguente modo:
      "Trasmissione atti notificati a carico di [COGNOME Nome, nato a LUOGO (PROV) il GG/MM/AAAA, residente a COMUNE (PROV) in VIA/PIAZZA, domiciliato a COMUNE (PROV) in VIA/PIAZZA]"
 
 4. CORPO DELLA LETTERA:
-   - Deve iniziare tassativamente con:
+   - DEVE iniziare tassativamente con:
      "Allegato alla presente si restituisce debitamente notificato al soggetto sopra meglio indicato "
    - Prosegui con il tipo di atto e i riferimenti precisi, terminando con "per il prosieguo di competenza.".
 
@@ -210,7 +221,7 @@ Rispondi ESCLUSIVAMENTE in formato JSON:
     contenuti.append(prompt)
 
     b = file_caricato.getvalue()
-    nome = getattr(file_caricato, "name", "").lower()
+    nome = getattr(file_caricato, "name", "atto.jpg").lower()
     mime = getattr(file_caricato, "type", "") or ""
 
     if nome.endswith(".pdf") or "pdf" in mime:
@@ -224,7 +235,6 @@ Rispondi ESCLUSIVAMENTE in formato JSON:
     else:
         contenuti.append(types.Part.from_bytes(data=b, mime_type="application/pdf"))
 
-    # Modello solido e veloce
     res = client.models.generate_content(
         model="gemini-2.5-flash",
         contents=contenuti,
@@ -244,14 +254,13 @@ Rispondi ESCLUSIVAMENTE in formato JSON:
 
 st.divider()
 
-# PULSANTE DI AZIONE PRINCIPALE
 if st.button("🚀 Elabora e Genera Lettera di Trasmissione", type="primary", use_container_width=True):
     if not api_key:
         st.error("❌ Manca la Gemini API Key. Inseriscila nella barra laterale a sinistra.")
     elif not file_atto:
-        st.error("❌ Nessun file caricato! Carica prima il PDF o la foto dell'atto al punto 1.")
+        st.error("❌ Nessun documento caricato! Seleziona prima un file PDF/Foto o scatta una foto al punto 1.")
     else:
-        with st.spinner("⏳ Analisi dell'atto ed estrazione dati con Gemini in corso..."):
+        with st.spinner("⏳ Analisi ed estrazione dati con Gemini in corso..."):
             try:
                 ind_fisso = rubrica_enti.get(ente_selezionato) if not ente_selezionato.startswith("--") else None
                 risultato = elabora_con_gemini(api_key, file_atto, note_input, ind_fisso)
@@ -264,16 +273,15 @@ if st.button("🚀 Elabora e Genera Lettera di Trasmissione", type="primary", us
             except Exception as e:
                 st.error(f"Errore durante l'elaborazione: {e}")
 
-# MOSTRA RISULTATI E DOWNLOAD SE PRESENTI IN MEMORIA
 if st.session_state.get("dati_elaborati"):
     dati = st.session_state["dati_elaborati"]
-    
-    st.subheader("📋 Anteprima e Modifica Dati")
+    st.subheader("📋 Dati Generati (Modificabili)")
+
     cp1, cp2 = st.columns(2)
     with cp1:
         prot_u = st.text_input("Protocollo Uscita:", value=protocollo_input)
     with cp2:
-        prot_r = st.text_input("Protocollo/Rif. Atto estratto:", value=dati.get("protocollo_riferimento", ""))
+        prot_r = st.text_input("Protocollo/Rif. Atto:", value=dati.get("protocollo_riferimento", ""))
 
     c1, c2 = st.columns(2)
     with c1:
@@ -283,7 +291,6 @@ if st.session_state.get("dati_elaborati"):
 
     corpo_f = st.text_area("Testo Trasmissione:", value=dati.get("corpo_lettera", ""), height=180)
 
-    # Creazione file Word pronto
     if modello_scelto.startswith("--"):
         word_buf = genera_docx_standard(data_odierna_str, prot_u, prot_r, dest_f, ogg_f, corpo_f)
     else:
