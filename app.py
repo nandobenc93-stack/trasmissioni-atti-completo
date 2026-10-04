@@ -39,6 +39,8 @@ with st.sidebar:
             st.session_state["gemini_key"] = api_input
             api_key = api_input
             st.rerun()
+    else:
+        st.success("API Key configurata!")
     
     st.subheader("Modelli Word")
     nuovo_modello = st.file_uploader("Carica modello (.docx)", type=["docx"], key="side_modello")
@@ -209,7 +211,7 @@ REGOLE TASSATIVE:
 
 NOTE AGGIUNTIVE: {note_op if note_op else "Notifica eseguita."}
 
-Rispondi ESCLUSIVAMENTE in formato JSON:
+Rispondi ESCLUSIVAMENTE con un oggetto JSON valido (senza testo prima o dopo) con queste chiavi:
 {{
   "protocollo_riferimento": "Rif. prot. ...",
   "nome_breve_ente": "Nome per rubrica",
@@ -227,7 +229,8 @@ Rispondi ESCLUSIVAMENTE in formato JSON:
     if nome.endswith(".pdf") or "pdf" in mime:
         contenuti.append(types.Part.from_bytes(data=b, mime_type="application/pdf"))
     elif any(nome.endswith(ext) for ext in [".png", ".jpg", ".jpeg", ".webp"]) or "image" in mime:
-        contenuti.append(types.Part.from_bytes(data=b, mime_type="image/jpeg"))
+        tipo_img = mime if "image" in mime else "image/jpeg"
+        contenuti.append(types.Part.from_bytes(data=b, mime_type=tipo_img))
     elif nome.endswith(".docx"):
         tdoc = Document(io.BytesIO(b))
         txt = "\n".join([p.text for p in tdoc.paragraphs if p.text.strip()])
@@ -235,11 +238,32 @@ Rispondi ESCLUSIVAMENTE in formato JSON:
     else:
         contenuti.append(types.Part.from_bytes(data=b, mime_type="application/pdf"))
 
-    res = client.models.generate_content(
-        model="gemini-2.5-flash",
-        contents=contenuti,
-        config={"response_mime_type": "application/json"}
+    # Configurazione corretta per google-genai
+    config = types.GenerateContentConfig(
+        response_mime_type="application/json"
     )
+
+    # Chiamata al modello con fallback
+    modelli = ["gemini-2.5-flash", "gemini-2.0-flash"]
+    res = None
+    ultimo_errore = None
+
+    for m in modelli:
+        try:
+            res = client.models.generate_content(
+                model=m,
+                contents=contenuti,
+                config=config
+            )
+            if res and res.text:
+                break
+        except Exception as e:
+            ultimo_errore = e
+            continue
+
+    if not res or not res.text:
+        raise Exception(f"Errore chiamata Gemini: {ultimo_errore}")
+
     t = res.text.strip()
     if t.startswith("```json"):
         t = t[7:]
@@ -247,6 +271,7 @@ Rispondi ESCLUSIVAMENTE in formato JSON:
         t = t[3:]
     if t.endswith("```"):
         t = t[:-3]
+        
     dati = json.loads(t.strip())
     if indirizzo_fisso:
         dati["destinatari"] = indirizzo_fisso
@@ -256,7 +281,7 @@ st.divider()
 
 if st.button("🚀 Elabora e Genera Lettera di Trasmissione", type="primary", use_container_width=True):
     if not api_key:
-        st.error("❌ Manca la Gemini API Key. Inseriscila nella barra laterale a sinistra.")
+        st.error("❌ Manca la Gemini API Key. Inseriscila nella barra laterale a sinistra o nei Secrets di Streamlit.")
     elif not file_atto:
         st.error("❌ Nessun documento caricato! Seleziona prima un file PDF/Foto o scatta una foto al punto 1.")
     else:
@@ -271,7 +296,8 @@ if st.button("🚀 Elabora e Genera Lettera di Trasmissione", type="primary", us
 
                 st.success("✅ Atto analizzato con successo!")
             except Exception as e:
-                st.error(f"Errore durante l'elaborazione: {e}")
+                st.error("Si è verificato un errore durante l'elaborazione:")
+                st.exception(e)
 
 if st.session_state.get("dati_elaborati"):
     dati = st.session_state["dati_elaborati"]
