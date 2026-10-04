@@ -8,7 +8,6 @@ import datetime
 import io
 import json
 import os
-import traceback
 from pathlib import Path
 
 st.set_page_config(page_title="Automazione Notifiche e Atti", layout="wide")
@@ -18,15 +17,8 @@ MODELLI_DIR = BASE_DIR / "modelli_riferimento"
 MODELLI_DIR.mkdir(parents=True, exist_ok=True)
 RUBRICA_FILE = BASE_DIR / "enti_rubrica.json"
 
-# Inizializzazione session state
-if "dati_elaborati" not in st.session_state:
-    st.session_state["dati_elaborati"] = None
-if "file_salvato_bytes" not in st.session_state:
-    st.session_state["file_salvato_bytes"] = None
-if "file_salvato_nome" not in st.session_state:
-    st.session_state["file_salvato_nome"] = ""
-if "file_salvato_mime" not in st.session_state:
-    st.session_state["file_salvato_mime"] = ""
+if "risultato_estratto" not in st.session_state:
+    st.session_state["risultato_estratto"] = None
 
 def get_api_key():
     if "GEMINI_API_KEY" in st.secrets and st.secrets["GEMINI_API_KEY"].strip():
@@ -41,7 +33,7 @@ with st.sidebar:
     st.title("Impostazioni")
     st.subheader("Chiave Gemini API")
     if chiave_attuale:
-        st.success("Chiave API collegata")
+        st.success("Chiave API rilevata")
     else:
         st.error("Nessuna chiave API trovata")
 
@@ -55,11 +47,11 @@ with st.sidebar:
 
     st.divider()
     st.subheader("Modelli Word")
-    nuovo_modello = st.file_uploader("Carica modello (.docx)", type=["docx"], key="side_modello_uploader")
+    nuovo_modello = st.file_uploader("Carica modello (.docx)", type=["docx"], key="modello_docx_uploader")
     if nuovo_modello:
         with open(MODELLI_DIR / nuovo_modello.name, "wb") as f:
             f.write(nuovo_modello.getbuffer())
-        st.success(f"Modello {nuovo_modello.name} pronto!")
+        st.success(f"Modello {nuovo_modello.name} salvato!")
         st.rerun()
 
 def carica_rubrica():
@@ -88,75 +80,39 @@ oggi = datetime.date.today()
 data_odierna_str = oggi.strftime("%d/%m/%Y")
 anno_corrente = oggi.year
 
-# Selezione modello Word
 modelli_docx = [f for f in os.listdir(MODELLI_DIR) if f.endswith(".docx") and not f.startswith("~$")]
 opzioni_modello = ["-- Modello Istituzionale Standard (Generato al volo) --"] + modelli_docx
-modello_scelto = st.selectbox("Formato / Modello Word di base da utilizzare:", opzioni_modello)
-
-col_prot, col_data = st.columns(2)
-with col_prot:
-    protocollo_input = st.text_input("Protocollo Uscita (in alto a sinistra)", value=f"N. /{anno_corrente}")
-with col_data:
-    st.info(f"Data documento (in alto a destra): {data_odierna_str}")
+modello_scelto = st.selectbox("Formato / Modello Word di base:", opzioni_modello)
 
 rubrica_enti = carica_rubrica()
 opzioni_enti = ["-- Rileva automaticamente dall'atto caricato --"] + list(rubrica_enti.keys())
 ente_selezionato = st.selectbox("Destinatario da Rubrica:", opzioni_enti)
 
-st.subheader("1. Atto/Richiesta di Notifica ricevuta (Opzionale)")
-st.caption("Puoi caricare un PDF, una foto, oppure non caricare nulla e inserire i dettagli solo a mano.")
+# --- INIZIO FORM PROTETTO (NON PERDE I DATI AL CLICK) ---
+with st.form("form_trasmissione", clear_on_submit=False):
+    col_prot, col_data = st.columns(2)
+    with col_prot:
+        protocollo_input = st.text_input("Protocollo Uscita (in alto a sinistra)", value=f"N. /{anno_corrente}")
+    with col_data:
+        st.info(f"Data documento (in alto a destra): {data_odierna_str}")
 
-c_up1, c_up2 = st.columns(2)
-with c_up1:
-    carica_doc = st.file_uploader("Carica File (PDF, Foto, Word):", key="file_up_atto")
-    if carica_doc is not None:
-        st.session_state["file_salvato_bytes"] = carica_doc.getvalue()
-        st.session_state["file_salvato_nome"] = carica_doc.name
-        st.session_state["file_salvato_mime"] = carica_doc.type or ""
-with c_up2:
-    scatta_doc = st.camera_input("Oppure scatta foto da fotocamera:")
-    if scatta_doc is not None:
-        st.session_state["file_salvato_bytes"] = scatta_doc.getvalue()
-        st.session_state["file_salvato_nome"] = "foto_scattata.jpg"
-        st.session_state["file_salvato_mime"] = "image/jpeg"
+    st.subheader("1. Atto/Richiesta di Notifica ricevuta")
+    file_atto = st.file_uploader(
+        "Carica il file dell'atto (PDF, Foto JPG/PNG o Word):",
+        type=["pdf", "png", "jpg", "jpeg", "docx"],
+        key="file_atto_form"
+    )
 
-# Mostra lo stato di aggancio
-if st.session_state["file_salvato_bytes"]:
-    col_info, col_del = st.columns([4, 1])
-    with col_info:
-        st.success(f"Documento agganciato per l'analisi: **{st.session_state['file_salvato_nome']}** ({round(len(st.session_state['file_salvato_bytes'])/1024, 1)} KB)")
-    with col_del:
-        if st.button("Rimuovi Allegato"):
-            st.session_state["file_salvato_bytes"] = None
-            st.session_state["file_salvato_nome"] = ""
-            st.session_state["file_salvato_mime"] = ""
-            st.rerun()
-else:
-    st.info("Nessun allegato presente (l'app genererà la lettera solo dalle note e dal modello Word).")
+    st.subheader("2. Note operative ed estremi notifica")
+    note_input = st.text_area(
+        "Dettagli operativi / anagrafica / estremi (opzionale):",
+        placeholder="Es. Notificato a mani proprie in data odierna..."
+    )
 
-st.subheader("2. Note operative ed estremi notifica")
-note_input = st.text_area(
-    "Dettagli operativi / anagrafica / estremi (se non hai caricato un file o per precisazioni):",
-    placeholder="Es. Notificato in data odierna a mani proprie del destinatario Rossi Mario nato a..."
-)
+    # Pulsante Form Submit: garantisce l'esecuzione immediata!
+    submit_btn = st.form_submit_button("🚀 ELABORA E GENERA LETTERA DI TRASMISSIONE", type="primary", use_container_width=True)
 
-def estrai_testo_docx(file_path):
-    try:
-        doc = Document(file_path)
-        return "\n".join([p.text for p in doc.paragraphs if p.text.strip()])
-    except Exception:
-        return ""
-
-def raccogli_esempi_stile():
-    esempi = []
-    for f in os.listdir(MODELLI_DIR):
-        if f.endswith(".docx") and not f.startswith("~$"):
-            percorso = MODELLI_DIR / f
-            testo = estrai_testo_docx(percorso)
-            if testo:
-                esempi.append(f"--- ESEMPIO DA '{f}' ---\n{testo[:1500]}\n")
-    return "\n".join(esempi)
-
+# --- LOGICA DI ELABORAZIONE ---
 def genera_docx_standard(data_str, prot_uscita, prot_rif, destinatari, oggetto, corpo):
     doc = Document()
     for section in doc.sections:
@@ -216,35 +172,32 @@ def genera_docx_standard(data_str, prot_uscita, prot_rif, destinatari, oggetto, 
     buf.seek(0)
     return buf
 
-def elabora_con_gemini(chiave, note_op, esempi_stile, indirizzo_fisso=None):
+def elabora_con_gemini(chiave, file_caricato, note_op, indirizzo_fisso=None):
     client = genai.Client(api_key=chiave)
     contenuti = []
 
     prompt = f"""
 Sei un addetto esperto delle Forze dell'Ordine / Pubblica Amministrazione italiana incaricato di redigere la lettera di trasmissione per la restituzione di un atto notificato.
 
-REQUISITI DI REDAZIONE:
+REGOLE TASSATIVE:
 1. PROTOCOLLO IN BASSO A SINISTRA:
-   - Estrai o individua gli estremi del protocollo, R.G.N.R. o riferimento della delega (es. "Rif. nota prot. n. ... del ...").
+   - Estrai protocollo, R.G.N.R., R.G. DIB o estremi dell'atto arrivato (es. "Rif. nota prot. n. 1234 del 12/03/2026").
 
-2. DESTINATARI (INDIRIZZO):
-   - Se indicato nel testo o nel documento allegato, individua autorità/cancelleria e indirizzo/PEC.
+2. DESTINATARI:
+   - Individua l'autorità o ufficio mittente (Tribunale, Procura, Questura, Prefettura, ecc.) con cancelleria e indirizzo/PEC.
    - Fornisci un "nome_breve_ente" sintetico per la rubrica.
 
-3. OGGETTO:
-   - DEVE iniziare con:
+3. DATI ANAGRAFICI ED OGGETTO:
+   - Estrai: cognome, nome, data e luogo di nascita, residenza e domicilio (se presenti).
+   - L'oggetto DEVE essere formulato nel seguente modo:
      "Trasmissione atti notificati a carico di [COGNOME Nome, nato a LUOGO (PROV) il GG/MM/AAAA, residente a COMUNE (PROV) in VIA/PIAZZA, domiciliato a COMUNE (PROV) in VIA/PIAZZA]"
 
 4. CORPO DELLA LETTERA:
    - DEVE iniziare tassativamente con:
      "Allegato alla presente si restituisce debitamente notificato al soggetto sopra meglio indicato "
-   - Prosegui con il tipo di atto e i riferimenti precisi, terminando con "per il prosieguo di competenza.".
+   - Prosegui con il tipo di atto e i relativi estremi dedotti dal documento, terminando con "per il prosieguo di competenza.".
 
-ESEMPI DI STILE DELL'UFFICIO:
-{esempi_stile}
-
-NOTE OPERATIVE INSERITE:
-{note_op if note_op else "Notifica eseguita regolarmente."}
+NOTE OPERATIVE: {note_op if note_op else "Notifica eseguita regolarmente."}
 
 Rispondi ESCLUSIVAMENTE con un JSON valido con questa struttura esatta:
 {{
@@ -257,23 +210,19 @@ Rispondi ESCLUSIVAMENTE con un JSON valido con questa struttura esatta:
 """
     contenuti.append(prompt)
 
-    # Se c'è un file allegato salvato in sessione, inseriscilo nel prompt di Gemini
-    if st.session_state["file_salvato_bytes"] is not None:
-        b = st.session_state["file_salvato_bytes"]
-        nome = st.session_state["file_salvato_nome"].lower()
-        mime = st.session_state["file_salvato_mime"].lower()
+    if file_caricato is not None:
+        b = file_caricato.getvalue()
+        nome = file_caricato.name.lower()
 
-        if nome.endswith(".pdf") or "pdf" in mime:
+        if nome.endswith(".pdf"):
             contenuti.append(types.Part.from_bytes(data=b, mime_type="application/pdf"))
-        elif any(nome.endswith(ext) for ext in [".png", ".jpg", ".jpeg", ".webp"]) or "image" in mime:
-            tipo_img = mime if "image" in mime else "image/jpeg"
-            contenuti.append(types.Part.from_bytes(data=b, mime_type=tipo_img))
+        elif any(nome.endswith(ext) for ext in [".png", ".jpg", ".jpeg", ".webp"]):
+            mime_tipo = "image/png" if nome.endswith(".png") else "image/jpeg"
+            contenuti.append(types.Part.from_bytes(data=b, mime_type=mime_tipo))
         elif nome.endswith(".docx"):
             tdoc = Document(io.BytesIO(b))
             txt = "\n".join([p.text for p in tdoc.paragraphs if p.text.strip()])
-            contenuti.append(f"\nTESTO ATTO:\n{txt}")
-        else:
-            contenuti.append(types.Part.from_bytes(data=b, mime_type="application/pdf"))
+            contenuti.append(f"\nTESTO DELL'ATTO ALLEGATO:\n{txt}")
 
     config = types.GenerateContentConfig(
         response_mime_type="application/json"
@@ -305,42 +254,35 @@ Rispondi ESCLUSIVAMENTE con un JSON valido con questa struttura esatta:
         dati["destinatari"] = indirizzo_fisso
     return dati
 
-st.divider()
-
-# PULSANTE UNICO DI AVVIO
-btn_elabora = st.button("🚀 Elabora e Genera Lettera di Trasmissione", type="primary", use_container_width=True)
-
-if btn_elabora:
+if submit_btn:
     if not chiave_attuale:
-        st.error("Inserisci la chiave Gemini API nella barra laterale sinistra.")
+        st.error("❌ Manca la chiave Gemini API! Inseriscila nella barra laterale sinistra.")
+    elif not file_atto and not note_input.strip():
+        st.error("❌ Inserisci almeno un file dell'atto oppure scrivi i dettagli nelle note operative.")
     else:
-        with st.status("Elaborazione e redazione lettera in corso...", expanded=True) as status:
+        with st.spinner("⏳ Analisi ed elaborazione con Gemini in corso... attendi qualche secondo..."):
             try:
-                stile = raccogli_esempi_stile()
                 ind_fisso = rubrica_enti.get(ente_selezionato) if not ente_selezionato.startswith("--") else None
-                
-                risultato = elabora_con_gemini(chiave_attuale, note_input, stile, ind_fisso)
-                st.session_state["dati_elaborati"] = risultato
+                risultato = elabora_con_gemini(chiave_attuale, file_atto, note_input, ind_fisso)
+                st.session_state["risultato_estratto"] = risultato
 
                 if ente_selezionato.startswith("--") and risultato.get("nome_breve_ente") and risultato.get("destinatari"):
                     aggiorna_rubrica(risultato["nome_breve_ente"], risultato["destinatari"])
 
-                status.update(label="Completato con successo!", state="complete", expanded=False)
-                st.success("Lettera generata con successo!")
-            except Exception as exc:
-                status.update(label="Errore riscontrato", state="error", expanded=True)
-                st.error(f"Errore: {exc}")
-                st.code(traceback.format_exc())
+                st.success("✅ Lettera generata con successo!")
+            except Exception as e:
+                st.error("Si è verificato un errore durante la chiamata a Gemini:")
+                st.exception(e)
 
-# AREA DI DOWNLOAD E MODIFICA
-if st.session_state.get("dati_elaborati"):
-    dati = st.session_state["dati_elaborati"]
+# SE I DATI SONO STATI ESTRATTI, MOSTRA L'ANTEPRIMA E IL TASTO SCARICA
+if st.session_state.get("risultato_estratto"):
+    dati = st.session_state["risultato_estratto"]
     st.markdown("---")
-    st.subheader("Dati Generati (Verifica e Modifica)")
+    st.subheader("📋 Lettera di Trasmissione Compilata")
 
     cp1, cp2 = st.columns(2)
     with cp1:
-        prot_u = st.text_input("Protocollo Uscita (in alto a sinistra):", value=protocollo_input)
+        prot_u = st.text_input("Protocollo Uscita (in alto a sinistra):", value=f"N. /{anno_corrente}")
     with cp2:
         prot_r = st.text_input("Protocollo/Riferimento Atto (in basso a sinistra):", value=dati.get("protocollo_riferimento", ""))
 
@@ -352,7 +294,6 @@ if st.session_state.get("dati_elaborati"):
 
     corpo_f = st.text_area("Testo Trasmissione:", value=dati.get("corpo_lettera", ""), height=180)
 
-    # Creazione documento Word finale
     if modello_scelto.startswith("--"):
         word_buf = genera_docx_standard(data_odierna_str, prot_u, prot_r, dest_f, ogg_f, corpo_f)
     else:
